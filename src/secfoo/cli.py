@@ -1861,7 +1861,9 @@ class FindingsFormat(str, Enum):
 
 # Lifecycle bookkeeping that means nothing outside this one SQLite file.
 _EXPORT_DROP_COLUMNS = {"id", "project_id", "first_seen_run_id", "last_seen_run_id", "closed_in_run_id"}
-_EXPORT_LOCATION_COLUMNS = {"location_file", "location_line", "code_region_hash", "reachability_evidence"}
+_EXPORT_LOCATION_COLUMNS = {
+    "location_file", "location_line", "locations", "code_region_hash", "reachability_evidence",
+}
 
 
 @findings_app.command(name="export")
@@ -1906,6 +1908,12 @@ def findings_export(
                 if column in _EXPORT_DROP_COLUMNS or (no_locations and column in _EXPORT_LOCATION_COLUMNS):
                     continue
                 record[column] = value
+            if isinstance(record.get("locations"), str):
+                # Stored as JSON text; exported as the list it is.
+                try:
+                    record["locations"] = json.loads(record["locations"])
+                except ValueError:
+                    record.pop("locations")
             if skill_id == "sca-reachability" and not no_runtime:
                 record["runtime"] = runtime.as_sarif()
             records.append(record)

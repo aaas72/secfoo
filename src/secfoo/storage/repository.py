@@ -105,6 +105,11 @@ _SAST_FINDINGS_MIGRATIONS = {
     "review_note": "ALTER TABLE sast_findings ADD COLUMN review_note TEXT",
     "reviewed_by": "ALTER TABLE sast_findings ADD COLUMN reviewed_by TEXT",
     "reviewed_at": "ALTER TABLE sast_findings ADD COLUMN reviewed_at TEXT",
+    "locations": "ALTER TABLE sast_findings ADD COLUMN locations TEXT",
+}
+
+_SECRET_FINDINGS_MIGRATIONS = {
+    "locations": "ALTER TABLE secret_findings ADD COLUMN locations TEXT",
 }
 
 SAST_REVIEW_STATUSES = ("confirmed", "false_positive", "accepted_risk")
@@ -178,6 +183,12 @@ class RunRepository:
         }
         for column, ddl in _SAST_FINDINGS_MIGRATIONS.items():
             if column not in existing_sast_cols:
+                self._add_column(ddl)
+        existing_secret_cols = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(secret_findings)").fetchall()
+        }
+        for column, ddl in _SECRET_FINDINGS_MIGRATIONS.items():
+            if column not in existing_secret_cols:
                 self._add_column(ddl)
         self._conn.commit()
         self._migrate_attachment_kind_check()
@@ -1433,6 +1444,7 @@ class RunRepository:
         language: str | None = None,
         framework: str | None = None,
         construct: str | None = None,
+        locations: str | None = None,
     ) -> None:
         """Inserts a newly-seen finding as open, or -- on a conflicting
         (project_id, fingerprint) -- refreshes it from this run's report
@@ -1444,16 +1456,16 @@ class RunRepository:
         now = _now()
         self._conn.execute(
             "INSERT INTO sast_findings (project_id, fingerprint, current_ref, title, severity, cwe, "
-            "owasp, verdict, location_file, location_line, code_region_hash, language, framework, construct, "
-            "cvss_vector, cvss_score, "
+            "owasp, verdict, location_file, location_line, locations, code_region_hash, language, framework, "
+            "construct, cvss_vector, cvss_score, "
             "description, recommendation, status, first_seen_run_id, first_seen_at, last_seen_run_id, "
             "last_seen_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?) "
             "ON CONFLICT(project_id, fingerprint) DO UPDATE SET "
             "current_ref = excluded.current_ref, title = excluded.title, severity = excluded.severity, "
             "cwe = excluded.cwe, owasp = excluded.owasp, verdict = excluded.verdict, "
             "location_file = excluded.location_file, location_line = excluded.location_line, "
-            "code_region_hash = excluded.code_region_hash, "
+            "locations = excluded.locations, code_region_hash = excluded.code_region_hash, "
             "language = excluded.language, framework = excluded.framework, construct = excluded.construct, "
             "cvss_vector = excluded.cvss_vector, cvss_score = excluded.cvss_score, "
             "description = excluded.description, recommendation = excluded.recommendation, status = 'open', "
@@ -1461,7 +1473,7 @@ class RunRepository:
             "closed_in_run_id = NULL, closed_at = NULL",
             (
                 project_id, fingerprint, current_ref, title, severity, cwe, owasp, verdict,
-                location_file, location_line, code_region_hash, language, framework, construct,
+                location_file, location_line, locations, code_region_hash, language, framework, construct,
                 cvss_vector, cvss_score, description, recommendation, run_id, now, run_id, now,
             ),
         )
@@ -1626,6 +1638,7 @@ class RunRepository:
         language: str | None = None,
         framework: str | None = None,
         construct: str | None = None,
+        locations: str | None = None,
     ) -> None:
         self._upsert_finding(
             "secret_findings",
@@ -1634,7 +1647,8 @@ class RunRepository:
             run_id=run_id,
             fields={
                 "current_ref": current_ref, "secret_type": secret_type, "location_file": location_file,
-                "location_line": location_line, "code_region_hash": code_region_hash, "source": source,
+                "location_line": location_line, "locations": locations,
+                "code_region_hash": code_region_hash, "source": source,
                 "validity": validity, "severity": severity, "evidence": evidence, "exposure": exposure,
                 "remediation": remediation, "language": language, "framework": framework,
                 "construct": construct,

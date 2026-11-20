@@ -1,6 +1,27 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+
+
+def site_labels(locations: str | None, location_file: str, location_line: str | None) -> list[str]:
+    """"file:start[-end]" for every site in a finding's `locations` JSON
+    (#112), or the single location_file/location_line when it has none."""
+    try:
+        sites = json.loads(locations) if locations else None
+    except ValueError:
+        sites = None
+    if not isinstance(sites, list) or not sites or not all(isinstance(site, dict) for site in sites):
+        sites = [{"file": location_file, "start_line": location_line}]
+    labels = []
+    for site in sites:
+        label = str(site.get("file") or "")
+        if site.get("start_line"):
+            label += f":{site['start_line']}"
+            if site.get("end_line"):
+                label += f"-{site['end_line']}"
+        labels.append(label)
+    return labels
 
 
 @dataclass(frozen=True)
@@ -184,7 +205,12 @@ class SastFindingRecord:
     review_note: str | None = None
     reviewed_by: str | None = None
     reviewed_at: str | None = None
+    locations: str | None = None
     project_display_name: str | None = None
+
+    @property
+    def site_labels(self) -> list[str]:
+        return site_labels(self.locations, self.location_file, self.location_line)
 
 
 @dataclass(frozen=True)
@@ -242,7 +268,12 @@ class SecretFindingRecord:
     last_seen_at: str
     closed_in_run_id: int | None
     closed_at: str | None
+    locations: str | None = None
     project_display_name: str | None = None
+
+    @property
+    def site_labels(self) -> list[str]:
+        return site_labels(self.locations, self.location_file, self.location_line)
 
 
 @dataclass(frozen=True)

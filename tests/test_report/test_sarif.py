@@ -95,3 +95,33 @@ def test_cwe_tags_are_normalized_deduplicated_and_unknown_values_ignored():
     rules = run["tool"]["driver"]["rules"]
     assert rules[0]["properties"]["tags"] == ["security", "external/cwe/cwe-79", "external/cwe/cwe-89"]
     assert rules[1]["properties"]["tags"] == ["security"]
+
+
+def test_multi_site_record_gets_one_location_per_site_with_line_ranges():
+    """#112: a range or multi-site location becomes one SARIF location per
+    site with startLine/endLine, never one bogus percent-encoded path."""
+    sites = [
+        {"file": "server.js", "start_line": "135", "end_line": "137"},
+        {"file": "app/views/layout.html", "start_line": "75", "end_line": None},
+        {"file": "app/views/layout.html", "start_line": "75", "end_line": None},
+    ]
+    for stored in (sites, json.dumps(sites)):
+        run = validate_sarif(findings_to_sarif([{
+            "skill_id": "sast", "severity": "High", "cwe": "CWE-79", "title": "XSS",
+            "location_file": "server.js", "location_line": "135", "locations": stored,
+        }]))
+        physical = [loc["physicalLocation"] for loc in run["results"][0]["locations"]]
+        assert physical == [
+            {"artifactLocation": {"uri": "server.js"}, "region": {"startLine": 135, "endLine": 137}},
+            {"artifactLocation": {"uri": "app/views/layout.html"}, "region": {"startLine": 75}},
+        ]
+
+
+def test_unreadable_locations_fall_back_to_the_single_location():
+    run = validate_sarif(findings_to_sarif([{
+        "skill_id": "sast", "severity": "Low", "title": "x",
+        "location_file": "app.py", "location_line": "3", "locations": "not json",
+    }]))
+    assert run["results"][0]["locations"] == [
+        {"physicalLocation": {"artifactLocation": {"uri": "app.py"}, "region": {"startLine": 3}}}
+    ]

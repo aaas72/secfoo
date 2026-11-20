@@ -9,6 +9,7 @@ waiting on an external agent CLI, not local CPU work.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -189,6 +190,12 @@ def _closed_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _locations_json(row: dict) -> str | None:
+    """Every site the register row names, for the `locations` column."""
+    sites = row.get("locations")
+    return json.dumps(sites) if sites else None
+
+
 def update_sast_findings(
     repo: RunRepository,
     *,
@@ -249,6 +256,7 @@ def update_sast_findings(
             verdict=row.get("verdict") or None,
             location_file=row["location_file"],
             location_line=row.get("location_line"),
+            locations=_locations_json(row),
             code_region_hash=row.get("code_region_hash"),
             cvss_vector=vector or None,
             cvss_score=score,
@@ -333,6 +341,7 @@ def update_secret_findings(
             secret_type=row["secret_type"],
             location_file=row["location_file"],
             location_line=row.get("location_line"),
+            locations=_locations_json(row),
             code_region_hash=row.get("code_region_hash"),
             source=row.get("source") or None,
             validity=row.get("validity") or None,

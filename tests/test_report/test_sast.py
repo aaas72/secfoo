@@ -6,7 +6,9 @@ from secfoo.report.sast import (
     extract_recommendation_by_id,
     findings_with_fingerprints,
     fingerprint_for_row,
+    legacy_fingerprint_for_row,
     parse_location,
+    parse_locations,
 )
 
 SAMPLE_REPORT = """\
@@ -133,17 +135,98 @@ def test_parse_location_handles_no_backticks():
     assert parse_location("app/db.py:42") == ("app/db.py", "42")
 
 
-def test_parse_location_strips_backticks_from_a_multi_location_cell():
-    """A real finding can legitimately span more than one call site (e.g.
-    a missing-auth finding citing both the app factory and the CLI flag
-    that exposes it) -- the contract only anticipates one `file:line`, so
-    this must degrade to the whole cell as one location string, not raise
-    or silently drop part of it. Backticks (Markdown code-span syntax) are
-    still stripped either way.
-    """
-    file_path, line = parse_location("`web/app.py:35`, `cli.py:308`")
-    assert file_path == "web/app.py:35, cli.py:308"
-    assert line is None
+def test_parse_location_keeps_the_first_site_of_a_multi_location_cell():
+    """A finding can span more than one call site (a missing-auth finding
+    citing both the app factory and the CLI flag that exposes it); the
+    primary location is the first site, never the whole cell (#112)."""
+    assert parse_location("`web/app.py:35`, `cli.py:308`") == ("web/app.py", "35")
+
+
+def _sites(location):
+    return [tuple(site) for site in parse_locations(location)]
+
+
+def test_parse_locations_reads_a_line_range():
+    assert _sites("config/env/all.js:8-9") == [("config/env/all.js", "8", "9")]
+
+
+def test_parse_locations_reads_comma_and_semicolon_separated_sites():
+    assert _sites("server.js:78-102, app/routes/session.js:116; app/routes/error.js") == [
+        ("server.js", "78", "102"),
+        ("app/routes/session.js", "116", None),
+        ("app/routes/error.js", None, None),
+    ]
+
+
+def test_parse_locations_bare_line_inherits_the_previous_file():
+    assert _sites("app/data/user-dao.js:25, :61") == [
+        ("app/data/user-dao.js", "25", None),
+        ("app/data/user-dao.js", "61", None),
+    ]
+    assert _sites("app/data/user-dao.js:25,61") == _sites("app/data/user-dao.js:25, :61")
+
+
+def test_parse_locations_strips_backticks_around_each_site():
+    assert _sites("`server.js:135-137`, `app/views/layout.html:75`") == [
+        ("server.js", "135", "137"),
+        ("app/views/layout.html", "75", None),
+    ]
+
+
+def test_parse_locations_keeps_a_windows_drive_in_the_path():
+    assert _sites("C:\\src\\app.py:12") == [("C:\\src\\app.py", "12", None)]
+
+
+def test_parse_locations_drops_a_backwards_or_empty_range_end():
+    assert _sites("app.py:40-12") == [("app.py", "40", None)]
+    assert _sites("app.py:7-7") == [("app.py", "7", None)]
+
+
+def test_parse_locations_without_a_usable_site_keeps_the_cell():
+    assert _sites("  ") == [("", None, None)]
+    assert _sites("`app/crypto.py`") == [("app/crypto.py", None, None)]
+
+
+def test_multi_site_fingerprint_uses_the_first_path_only():
+    single = {"cwe": "CWE-79", "location": "`server.js:135`"}
+    multi = {"cwe": "CWE-79", "location": "`server.js:135-137`, `app/views/layout.html:75`"}
+    assert fingerprint_for_row(single) == fingerprint_for_row(multi)
+
+
+def test_legacy_fingerprint_matches_rows_stored_before_multi_site_parsing():
+    """Open rows stored under the whole cell as their "file" must be found
+    by the legacy key so the runner re-keys them instead of closing and
+    re-opening them."""
+    import hashlib
+
+    row = {"cwe": "CWE-79", "location": "`server.js:135-137`, `app/views/layout.html:75`"}
+    stored = hashlib.sha256(b"sast|cwe-79|server.js:135-137, app/views/layout.html:75").hexdigest()
+    assert legacy_fingerprint_for_row(row, line_bucket="6") == stored
+    assert fingerprint_for_row(row) != stored
+
+
+def test_nodegoat_sample_register_has_no_bogus_paths():
+    """The NodeGoat sample report's register (#112): every row is a range or
+    a multi-site cell, and every parsed path must be a real path."""
+    from pathlib import Path
+
+    report = (Path(__file__).resolve().parents[2] / "examples/sample-output/nodegoat/sast-report.md").read_text()
+    rows = findings_with_fingerprints(report)
+    assert len(rows) == 12
+    for row in rows:
+        for site in row["locations"]:
+            assert ":" not in site["file"] and "," not in site["file"], site
+            assert site["start_line"] is None or site["start_line"].isdigit()
+    by_id = {row["id"]: row for row in rows}
+    assert by_id["F12"]["location_file"] == "server.js"
+    assert by_id["F12"]["location_line"] == "78"
+    assert [site["file"] for site in by_id["F12"]["locations"]] == [
+        "server.js", "app/routes/session.js", "app/routes/error.js",
+    ]
+    assert by_id["F7"]["locations"] == [
+        {"file": "app/data/user-dao.js", "start_line": "25", "end_line": None},
+        {"file": "app/data/user-dao.js", "start_line": "61", "end_line": None},
+    ]
 
 
 def test_fingerprint_for_row_is_stable_for_identical_cwe_and_file_without_region_hash():

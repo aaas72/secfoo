@@ -230,3 +230,22 @@ def test_sast_findings_list_accepts_the_all_projects_option(client):
     resp = client.get("/activities/sast/findings?status=open&project_id=&severity=&found_from=&found_to=&q=")
     assert resp.status_code == 200
     assert "SQL Injection" in resp.text
+
+
+def test_multi_site_finding_shows_every_site(client):
+    """#112: the detail page lists every site; list views show the first
+    site and how many more there are."""
+    import json
+
+    sites = [
+        {"file": "server.js", "start_line": "135", "end_line": "137"},
+        {"file": "app/views/layout.html", "start_line": "75", "end_line": None},
+    ]
+    _seed_finding(fingerprint="fp-multi", location_file="server.js", location_line="135",
+                  locations=json.dumps(sites))
+    detail = client.get("/activities/sast/findings/fp-multi").text
+    assert "<code>server.js:135-137</code>" in detail
+    assert "<code>app/views/layout.html:75</code>" in detail
+    listing = client.get("/activities/sast/findings").text
+    assert "<code>server.js:135-137</code>" in listing
+    assert "+1 more" in listing

@@ -13,6 +13,7 @@ import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 
+from secfoo.report.sast import parse_locations
 from secfoo.report.secret_scanning import SKILL_ID, findings_with_narrative
 from secfoo.storage.repository import RunRepository
 from secfoo.web.dashboard_common import read_report
@@ -22,12 +23,16 @@ _read = read_report
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
-def _strip_inline_code(value: str) -> str:
-    """Remove Markdown backticks from a table cell value."""
-    value = value.strip()
-    if len(value) >= 2 and value[0] == "`" and value[-1] == "`":
-        return value[1:-1]
-    return value
+def _location_text(value: str) -> str:
+    """A location cell as plain text: every site it names (#112), without
+    the Markdown backticks around each one."""
+    labels = []
+    for site in parse_locations(value):
+        label = site.file
+        if site.start_line:
+            label += f":{site.start_line}" + (f"-{site.end_line}" if site.end_line else "")
+        labels.append(label)
+    return ", ".join(labels)
 
 
 def _key(project_id: int, finding_id: str, secret_type: str, location: str) -> str:
@@ -75,7 +80,7 @@ def build(repo: RunRepository) -> SecretScanningDashboard:
         if not text:
             continue
         for row in findings_with_narrative(text):
-            location = _strip_inline_code(row["location"])
+            location = _location_text(row["location"])
             finding = SecretFinding(
                 key=_key(project["project_id"], row["id"], row["secret_type"], location),
                 finding_id=row["id"],

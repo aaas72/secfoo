@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from secfoo.report.code_region import hash_code_region
 from secfoo.report.markdown import detail_blocks, example_finding_ids, prose_source
@@ -127,15 +128,63 @@ def extract_construct_by_id(report_markdown: str) -> dict[str, str]:
     return result
 
 
-def parse_location(location: str) -> tuple[str, str | None]:
-    """"`app/db.py:42`" -> ("app/db.py", "42"); a location with no line
-    number, or text that doesn't cleanly split into a single file:line
-    (e.g. a finding spanning several call sites, like
-    "`app.py:35`, `cli.py:308`"), degrades to (location_stripped, None)
-    rather than raising or silently dropping part of it -- backticks are
-    stripped either way since they're Markdown code-span syntax, never
-    part of a real path.
+class Site(NamedTuple):
+    """One place a finding points at: a file and an optional line range."""
+
+    file: str
+    start_line: str | None = None
+    end_line: str | None = None
+
+
+# One site: an optional Windows drive, a path, then an optional `:start` or
+# `:start-end`. A bare `:61` / `61` / `61-70` (no path) continues the
+# previous site's file, as in "app/data/user-dao.js:25, :61".
+_DRIVE = r"(?:[A-Za-z]:[\\/])?"
+_SITE_RE = re.compile(r"^(?P<file>" + _DRIVE + r"[^:]*?)(?::(?P<start>\d+)(?:\s*[-–]\s*(?P<end>\d+))?)?$")
+_LINE_ONLY_RE = re.compile(r"^:?(?P<start>\d+)(?:\s*[-–]\s*(?P<end>\d+))?$")
+
+
+def parse_locations(location: str) -> list[Site]:
+    """Every site in a Findings Register location cell.
+
+    Agents write ranges and multi-site locations often:
+    "config/env/all.js:8-9", "server.js:78-102, app/routes/session.js:116",
+    "app/data/user-dao.js:25, :61", "`server.js:135-137`, `layout.html:75`".
+    Sites are separated by commas or semicolons; backticks are Markdown
+    code-span syntax, never part of a path. Text that holds no usable
+    site degrades to one site with the whole cell as the file, as before.
     """
+    stripped = location.strip().replace("`", "")
+    sites: list[Site] = []
+    for token in (part.strip() for part in re.split(r"[,;]", stripped)):
+        if not token:
+            continue
+        line_only = _LINE_ONLY_RE.match(token)
+        if line_only and sites:
+            sites.append(Site(sites[-1].file, line_only["start"], line_only["end"]))
+            continue
+        match = _SITE_RE.match(token)
+        if match and match["file"].strip():
+            start, end = match["start"], match["end"]
+            if start is not None and end is not None and int(end) < int(start):
+                end = None  # "40-12" is not a range a model meant; keep the start line
+            sites.append(Site(match["file"].strip(), start, end if end != start else None))
+    return sites or [Site(stripped)]
+
+
+def parse_location(location: str) -> tuple[str, str | None]:
+    """"`app/db.py:42`" -> ("app/db.py", "42") -- the first site of
+    parse_locations(), which is what location_file/location_line and the
+    fingerprint use. A cell with no line number keeps (file, None).
+    """
+    first = parse_locations(location)[0]
+    return first.file, first.start_line
+
+
+def _legacy_parse_location(location: str) -> tuple[str, str | None]:
+    """The single-site parser before #112: anything but `file:line` became
+    the whole cell as the file. Only used to find open rows stored under
+    that key so they can be re-keyed instead of closed and re-opened."""
     stripped = location.strip()
     match = _LOCATION_RE.match(stripped)
     if not match:
@@ -143,20 +192,17 @@ def parse_location(location: str) -> tuple[str, str | None]:
     return match.group("file").strip(), match.group("line")
 
 
+def sites_as_records(sites: list[Site]) -> list[dict[str, str | None]]:
+    """JSON-ready form stored in the `locations` column and exported."""
+    return [{"file": s.file, "start_line": s.start_line, "end_line": s.end_line} for s in sites]
+
+
 def _normalize_path(file_path: str) -> str:
     return file_path.strip().lstrip("./").lower()
 
 
-def fingerprint_for_row(
-    row: dict[str, str],
-    *,
-    line_bucket: str | None = None,
-    region_hash: str | None = None,
-) -> str:
-    """Stable cross-run identity from contract fields + optional source hash."""
-    file_path, _line = parse_location(row["location"])
-    cwe = row.get("cwe", "").strip().lower()
-    parts = [SKILL_ID, cwe, _normalize_path(file_path)]
+def _fingerprint(cwe: str, file_path: str, *, line_bucket: str | None, region_hash: str | None) -> str:
+    parts = [SKILL_ID, cwe.strip().lower(), _normalize_path(file_path)]
     if region_hash:
         parts.append(region_hash)
     elif line_bucket is not None:
@@ -165,9 +211,28 @@ def fingerprint_for_row(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def fingerprint_for_row(
+    row: dict[str, str],
+    *,
+    line_bucket: str | None = None,
+    region_hash: str | None = None,
+) -> str:
+    """Stable cross-run identity from contract fields + optional source hash.
+    A multi-site location is keyed on its first site only."""
+    file_path, _line = parse_location(row["location"])
+    return _fingerprint(row.get("cwe", ""), file_path, line_bucket=line_bucket, region_hash=region_hash)
+
+
 def legacy_fingerprint_for_row(row: dict[str, str], *, line_bucket: str | None = None) -> str:
-    """Pre-region-hash identity (CWE + path [+ line bucket]). Used to rekey open rows on upgrade."""
-    return fingerprint_for_row(row, line_bucket=line_bucket, region_hash=None)
+    """Identity before region hashes and before multi-site parsing (#112):
+    CWE + the old single-site path [+ line bucket]. Used to rekey open rows
+    on upgrade, so a range or multi-site location already stored under the
+    whole cell as its "file" is moved to the new key instead of being
+    closed and re-opened."""
+    file_path, line = _legacy_parse_location(row["location"])
+    return _fingerprint(
+        row.get("cwe", ""), file_path, line_bucket=line_bucket if line is not None else None, region_hash=None
+    )
 
 
 def findings_with_fingerprints(
@@ -192,16 +257,18 @@ def findings_with_fingerprints(
     # Group indices by (cwe, file) to detect same-run collisions before
     # computing any fingerprint.
     groups: dict[tuple[str, str], list[int]] = {}
-    parsed_locations: list[tuple[str, str | None]] = []
+    parsed_sites: list[list[Site]] = []
     for row in rows:
-        file_path, line = parse_location(row["location"])
-        parsed_locations.append((file_path, line))
+        sites = parse_locations(row["location"])
+        parsed_sites.append(sites)
+        file_path = sites[0].file
         key = (row.get("cwe", "").strip().lower(), _normalize_path(file_path))
-        groups.setdefault(key, []).append(len(parsed_locations) - 1)
+        groups.setdefault(key, []).append(len(parsed_sites) - 1)
 
     results = []
     for index, row in enumerate(rows):
-        file_path, line = parsed_locations[index]
+        sites = parsed_sites[index]
+        file_path, line = sites[0].file, sites[0].start_line
         key = (row.get("cwe", "").strip().lower(), _normalize_path(file_path))
         region_hash = None
         if workdir is not None and line is not None:
@@ -218,6 +285,7 @@ def findings_with_fingerprints(
                 **row,
                 "location_file": file_path,
                 "location_line": line,
+                "locations": sites_as_records(sites),
                 "code_region_hash": region_hash,
                 "fingerprint": fingerprint,
                 "legacy_fingerprint": legacy_fingerprint,
